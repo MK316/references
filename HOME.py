@@ -1,213 +1,815 @@
 import time
 import random
+import re
+import unicodedata
+
 import pandas as pd
 import streamlit as st
 
 from scholarly import scholarly, ProxyGenerator
 from Levenshtein import ratio
-from bibtexparser.bibdatabase import BibDatabase
 
 
-# ----------------------------
+# ============================================================
 # Page config
-# ----------------------------
-st.set_page_config(page_title="Reference Validator (Google Scholar)", layout="wide")
-st.title("📚 Reference Validator (Google Scholar)")
-st.caption("⚠️ Google Scholar는 자동 요청을 차단할 수 있어 결과가 'Error'로 나올 수 있습니다. 특히 Streamlit Cloud에서는 빈번합니다.")
+# ============================================================
+st.set_page_config(
+    page_title="Reference Validator (Google Scholar)",
+    layout="wide"
+)
+
+st.title("📚 Reference Validator")
+st.caption(
+    "Paste one reference per line. "
+    "The app extracts the title, searches Google Scholar, "
+    "and checks whether the titles match."
+)
 
 
-# ----------------------------
+# ============================================================
 # Defaults
-# ----------------------------
-DEFAULT_TITLES = [
-    "Attention Is All You Need",
-    "Generative Adversarial Nets",
-    "A Non-existent Paper about Flying Spaghettis in Deep Learning",
-    "국가 AI 정책과 영어영문학의 비밀에 대한 연구",
+# ============================================================
+DEFAULT_REFERENCES = [
+    "Vaswani, A., et al. (2017). Attention is all you need. Advances in Neural Information Processing Systems, 30.",
+    "Goodfellow, I., et al. (2014). Generative adversarial nets. Advances in Neural Information Processing Systems, 27.",
+    "Smith, J. (2020). A non-existent paper about flying spaghettis in deep learning. Journal of Imaginary Research, 10(2), 1–10.",
 ]
 
 
-# ----------------------------
-# Optional: Proxy support
-# ----------------------------
-def configure_proxy_if_available() -> bool:
+# ============================================================
+# Text normalization
+# ============================================================
+def normalize_title(text: str) -> str:
     """
-    Streamlit Secrets에 아래 키가 있으면 SOCKS5 프록시를 설정합니다.
-    - proxy_host
-    - proxy_port
-    - proxy_user (optional)
-    - proxy_pass (optional)
+    Normalize titles before comparison:
+    - lowercase
+    - Unicode normalization
+    - remove punctuation
+    - normalize whitespace
+    """
+    if not text:
+        return ""
 
-    예) .streamlit/secrets.toml
-    proxy_host="xxx"
-    proxy_port="1080"
-    proxy_user="user"
-    proxy_pass="pass"
+    text = unicodedata.normalize("NFKC", text)
+    text = text.lower()
+
+    # Normalize various apostrophes/dashes
+    text = text.replace("’", "'")
+    text = text.replace("‘", "'")
+    text = text.replace("–", "-")
+    text = text.replace("—", "-")
+
+    # Keep letters/numbers/spaces only
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+
+    # Collapse spaces
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+# ============================================================
+# Extract title from reference
+# ============================================================
+def extract_title_from_reference(reference: str) -> str:
     """
+    Extract the title from an APA-like reference.
+
+    Examples:
+    Braun, V., & Clarke, V. (2006). Using thematic analysis
+    in psychology. Qualitative Research in Psychology, 3(2), ...
+
+    -> Using thematic analysis in psychology
+
+    If no year pattern is found, the entire input is treated as a title.
+    """
+
+    reference = reference.strip()
+
+    if not reference:
+        return ""
+
+    # --------------------------------------------------------
+    # Find publication year
+    # Supports:
+    # (2006)
+    # (2018a)
+    # (2021b)
+    # (n.d.)
+    # --------------------------------------------------------
+    year_pattern = r"\((?:\d{4}[a-z]?|n\.d\.)\)"
+    match = re.search(year_pattern, reference, flags=re.IGNORECASE)
+
+    if not match:
+        # User may have entered title only
+        return reference.strip(" .")
+
+    # Everything after the year
+    remainder = reference[match.end():].strip()
+
+    # Remove leading punctuation
+    remainder = re.sub(r"^[\.\s]+", "", remainder)
+
+    if not remainder:
+        return reference
+
+    # --------------------------------------------------------
+    # APA article/book/chapter:
+    # Title usually ends at first ". "
+    #
+    # Special handling:
+    # Do not split after common abbreviations.
+    # --------------------------------------------------------
+
+    protected = remainder
+
+    abbreviations = [
+        "e.g.",
+        "i.e.",
+        "et al.",
+        "U.S.",
+        "U.K.",
+        "Ph.D.",
+        "Ed.D.",
+        "L2.",
+        "EFL.",
+        "ESL.",
+    ]
+
+    placeholders = {}
+
+    for i, abbreviation in enumerate(abbreviations):
+        placeholder = f"__ABBR{i}__"
+        if abbreviation.lower() in protected.lower():
+
+            pattern = re.compile(
+                re.escape(abbreviation),
+                flags=re.IGNORECASE
+            )
+
+            found = pattern.search(protected)
+
+            if found:
+                original = found.group()
+                placeholders[placeholder] = original
+                protected = pattern.sub(placeholder, protected)
+
+    # First period followed by whitespace and likely next bibliographic field
+    parts = re.split(r"\.\s+", protected, maxsplit=1)
+
+    title = parts[0].strip()
+
+    # Restore abbreviations
+    for placeholder, original in placeholders.items():
+        title = title.replace(placeholder, original)
+
+    # Final cleanup
+    title = title.strip(" .")
+
+    return title
+
+
+# ============================================================
+# Similarity
+# ============================================================
+def title_similarity(title1: str, title2: str) -> float:
+    """
+    Levenshtein ratio after normalization.
+    Returns percentage.
+    """
+
+    t1 = normalize_title(title1)
+    t2 = normalize_title(title2)
+
+    if not t1 or not t2:
+        return 0.0
+
+    return round(ratio(t1, t2) * 100, 2)
+
+
+# ============================================================
+# Match classification
+# ============================================================
+def classify_match(similarity: float, match_threshold: int, mismatch_threshold: int):
+    """
+    Example:
+    >= 90 : Match
+    75-89 : Possible mismatch
+    < 75  : Mismatch
+    """
+
+    if similarity >= match_threshold:
+        return "✅ Match"
+
+    elif similarity >= mismatch_threshold:
+        return "⚠️ Possible mismatch"
+
+    else:
+        return "❌ Mismatch"
+
+
+# ============================================================
+# Optional proxy support
+# ============================================================
+def configure_proxy_if_available() -> bool:
+
     try:
         secrets = st.secrets
+
         if "proxy_host" not in secrets or "proxy_port" not in secrets:
             return False
 
         host = secrets["proxy_host"]
         port = int(secrets["proxy_port"])
+
         user = secrets.get("proxy_user", None)
         pw = secrets.get("proxy_pass", None)
 
         pg = ProxyGenerator()
+
         ok = pg.SingleProxy(
             http=f"socks5://{host}:{port}",
             https=f"socks5://{host}:{port}",
             user=user,
             password=pw,
         )
+
         if ok:
             scholarly.use_proxy(pg)
             return True
+
         return False
+
     except Exception:
         return False
 
 
-# ----------------------------
-# Scholar check function
-# ----------------------------
-def check_reference_validity(title_to_check: str):
+# ============================================================
+# Google Scholar check
+# ============================================================
+def check_reference_validity(
+    original_reference: str,
+    title_to_check: str,
+    match_threshold: int,
+    mismatch_threshold: int,
+    max_candidates: int = 5,
+):
     """
-    Google Scholar에서 title_to_check를 검색하고 첫 결과의 제목과 유사도(%)를 반환.
-    """
-    try:
-        search_query = scholarly.search_pubs(title_to_check)
-        first_result = next(search_query)  # StopIteration if no results
+    Search Google Scholar using extracted title.
 
-        found_title = first_result.get("bib", {}).get("title", "")
-        similarity = ratio(title_to_check.lower(), found_title.lower()) if found_title else 0.0
+    Instead of blindly using the first Scholar result,
+    inspect several candidates and select the title with
+    the highest similarity.
+    """
+
+    try:
+
+        search_query = scholarly.search_pubs(title_to_check)
+
+        candidates = []
+
+        for _ in range(max_candidates):
+
+            try:
+                result = next(search_query)
+            except StopIteration:
+                break
+
+            found_title = (
+                result
+                .get("bib", {})
+                .get("title", "")
+            )
+
+            if not found_title:
+                continue
+
+            similarity = title_similarity(
+                title_to_check,
+                found_title
+            )
+
+            candidates.append({
+                "result": result,
+                "found_title": found_title,
+                "similarity": similarity,
+            })
+
+        # No Scholar results
+        if not candidates:
+
+            return {
+                "status": "Not Found",
+                "match_status": "❓ Not Found",
+                "original_reference": original_reference,
+                "extracted_title": title_to_check,
+                "found_title": None,
+                "similarity": 0.0,
+                "url": None,
+            }
+
+        # Choose candidate with best title similarity
+        best = max(
+            candidates,
+            key=lambda x: x["similarity"]
+        )
+
+        best_result = best["result"]
+        best_title = best["found_title"]
+        best_similarity = best["similarity"]
+
+        match_status = classify_match(
+            best_similarity,
+            match_threshold,
+            mismatch_threshold
+        )
+
+        url = (
+            best_result.get("pub_url")
+            or best_result.get("eprint_url")
+            or "N/A"
+        )
 
         return {
             "status": "Found",
-            "searched_title": title_to_check,
-            "found_title": found_title,
-            "similarity": round(similarity * 100, 2),
-            "url": first_result.get("pub_url") or first_result.get("eprint_url") or "N/A",
+            "match_status": match_status,
+            "original_reference": original_reference,
+            "extracted_title": title_to_check,
+            "found_title": best_title,
+            "similarity": best_similarity,
+            "url": url,
         }
 
-    except StopIteration:
+    except Exception as e:
+
         return {
-            "status": "Not Found",
-            "searched_title": title_to_check,
+            "status": "Error",
+            "match_status": "🚫 Error",
+            "original_reference": original_reference,
+            "extracted_title": title_to_check,
             "found_title": None,
             "similarity": 0.0,
             "url": None,
-        }
-    except Exception as e:
-        return {
-            "status": "Error",
-            "searched_title": title_to_check,
-            "found_title": str(e),
-            "similarity": 0.0,
-            "url": None,
+            "error": str(e),
         }
 
 
-# ----------------------------
-# Sidebar controls
-# ----------------------------
+# ============================================================
+# Sidebar
+# ============================================================
 st.sidebar.header("⚙️ Settings")
-min_delay = st.sidebar.slider("Minimum delay (seconds)", 2, 15, 5, 1)
-max_delay = st.sidebar.slider("Maximum delay (seconds)", min_delay, 25, 10, 1)
-max_retries = st.sidebar.slider("Retries on Error", 0, 3, 1, 1)
-
-use_proxy = st.sidebar.checkbox("Try proxy from secrets.toml (optional)", value=False)
-if use_proxy:
-    ok = configure_proxy_if_available()
-    st.sidebar.write("Proxy status:", "✅ enabled" if ok else "❌ not configured / failed")
 
 
-# ----------------------------
-# Input titles
-# ----------------------------
-st.subheader("✅ Titles to verify")
-raw_text = st.text_area(
-    "Enter one title per line",
-    value="\n".join(DEFAULT_TITLES),
-    height=160,
+# ------------------------------------------------------------
+# Similarity thresholds
+# ------------------------------------------------------------
+st.sidebar.subheader("Title matching")
+
+match_threshold = st.sidebar.slider(
+    "Match threshold (%)",
+    min_value=80,
+    max_value=100,
+    value=90,
+    step=1,
 )
 
-titles = [t.strip() for t in raw_text.splitlines() if t.strip()]
-if not titles:
-    st.warning("Please enter at least one title.")
+mismatch_threshold = st.sidebar.slider(
+    "Possible mismatch threshold (%)",
+    min_value=50,
+    max_value=89,
+    value=75,
+    step=1,
+)
+
+max_candidates = st.sidebar.slider(
+    "Scholar results to compare",
+    min_value=1,
+    max_value=10,
+    value=5,
+    step=1,
+)
+
+
+# ------------------------------------------------------------
+# Request timing
+# ------------------------------------------------------------
+st.sidebar.subheader("Scholar requests")
+
+min_delay = st.sidebar.slider(
+    "Minimum delay (seconds)",
+    2,
+    15,
+    5,
+    1,
+)
+
+max_delay = st.sidebar.slider(
+    "Maximum delay (seconds)",
+    min_delay,
+    25,
+    10,
+    1,
+)
+
+max_retries = st.sidebar.slider(
+    "Retries on Error",
+    0,
+    3,
+    1,
+    1,
+)
+
+
+# ------------------------------------------------------------
+# Proxy
+# ------------------------------------------------------------
+use_proxy = st.sidebar.checkbox(
+    "Try proxy from secrets.toml",
+    value=False
+)
+
+if use_proxy:
+
+    ok = configure_proxy_if_available()
+
+    st.sidebar.write(
+        "Proxy status:",
+        "✅ enabled"
+        if ok
+        else "❌ not configured / failed"
+    )
+
+
+# ============================================================
+# Input
+# ============================================================
+st.subheader("📚 References to verify")
+
+st.write(
+    "Enter **one complete reference per line**. "
+    "The title will be extracted automatically."
+)
+
+raw_text = st.text_area(
+    "References",
+    value="\n".join(DEFAULT_REFERENCES),
+    height=250,
+)
+
+references = [
+    r.strip()
+    for r in raw_text.splitlines()
+    if r.strip()
+]
+
+if not references:
+    st.warning("Please enter at least one reference.")
     st.stop()
 
+
+# ============================================================
+# Preview extracted titles
+# ============================================================
+preview_data = []
+
+for ref in references:
+
+    extracted = extract_title_from_reference(ref)
+
+    preview_data.append({
+        "Reference": ref,
+        "Extracted title": extracted
+    })
+
+
+preview_df = pd.DataFrame(preview_data)
+
+with st.expander("🔎 Preview extracted titles", expanded=True):
+
+    st.dataframe(
+        preview_df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# Run button
+# ============================================================
 colA, colB = st.columns([1, 2])
+
 with colA:
-    run = st.button("🔍 Run verification", type="primary")
+
+    run = st.button(
+        "🔍 Run verification",
+        type="primary"
+    )
+
 with colB:
-    st.write(f"Total titles: **{len(titles)}**")
+
+    st.write(
+        f"Total references: **{len(references)}**"
+    )
 
 
-# ----------------------------
-# Run
-# ----------------------------
+# ============================================================
+# Run verification
+# ============================================================
 if run:
+
     results = []
+
     progress = st.progress(0)
+
     log_box = st.empty()
 
-    with st.status("Running Google Scholar checks...", expanded=True) as status:
-        for i, title in enumerate(titles, start=1):
-            log_box.write(f"🔍 Searching: **{title}**")
+    with st.status(
+        "Running Google Scholar checks...",
+        expanded=True
+    ) as status:
+
+        for i, reference in enumerate(
+            references,
+            start=1
+        ):
+
+            # ----------------------------------------------
+            # Extract title
+            # ----------------------------------------------
+            extracted_title = extract_title_from_reference(
+                reference
+            )
+
+            log_box.write(
+                f"🔍 Searching: **{extracted_title}**"
+            )
 
             attempt = 0
             result = None
 
             while True:
-                attempt += 1
-                result = check_reference_validity(title)
 
-                # If Error and retries remain, wait and retry
-                if result["status"] == "Error" and attempt <= max_retries:
-                    st.write(f"⚠️ Error (attempt {attempt}/{max_retries}). Retrying after a delay...")
-                    time.sleep(random.uniform(min_delay, max_delay))
+                attempt += 1
+
+                result = check_reference_validity(
+                    original_reference=reference,
+                    title_to_check=extracted_title,
+                    match_threshold=match_threshold,
+                    mismatch_threshold=mismatch_threshold,
+                    max_candidates=max_candidates,
+                )
+
+                # Retry Scholar error
+                if (
+                    result["status"] == "Error"
+                    and attempt <= max_retries
+                ):
+
+                    st.write(
+                        f"⚠️ Error "
+                        f"(attempt {attempt}/{max_retries}). "
+                        f"Retrying..."
+                    )
+
+                    time.sleep(
+                        random.uniform(
+                            min_delay,
+                            max_delay
+                        )
+                    )
+
                     continue
+
                 break
+
 
             results.append(result)
 
-            # Update UI per item
+
+            # =================================================
+            # Display individual result
+            # =================================================
             if result["status"] == "Found":
-                st.success(f"✅ Found | Similarity: {result['similarity']}%")
-                st.write(f"- Searched: {result['searched_title']}")
-                st.write(f"- Found: {result['found_title']}")
-                if result["url"] and result["url"] != "N/A":
-                    st.write(f"- URL: {result['url']}")
+
+                if result["match_status"] == "✅ Match":
+
+                    st.success(
+                        f"{result['match_status']} | "
+                        f"{result['similarity']}%"
+                    )
+
+                elif result["match_status"] == "⚠️ Possible mismatch":
+
+                    st.warning(
+                        f"{result['match_status']} | "
+                        f"{result['similarity']}%"
+                    )
+
+                else:
+
+                    st.error(
+                        f"{result['match_status']} | "
+                        f"{result['similarity']}%"
+                    )
+
+
+                st.write(
+                    f"**Reference title:** "
+                    f"{result['extracted_title']}"
+                )
+
+                st.write(
+                    f"**Scholar title:** "
+                    f"{result['found_title']}"
+                )
+
+                if (
+                    result["url"]
+                    and result["url"] != "N/A"
+                ):
+
+                    st.write(
+                        f"**URL:** {result['url']}"
+                    )
+
+
             elif result["status"] == "Not Found":
-                st.warning("❌ Not Found on Google Scholar (or no results returned).")
+
+                st.warning(
+                    f"❓ Not Found: "
+                    f"{result['extracted_title']}"
+                )
+
+
             else:
-                st.error(f"🚫 Error: {result['found_title']}")
 
-            # Delay to reduce blocking risk (even after success)
-            time.sleep(random.uniform(min_delay, max_delay))
+                st.error(
+                    f"🚫 Error: "
+                    f"{result.get('error', 'Unknown error')}"
+                )
 
-            progress.progress(i / len(titles))
 
-        status.update(label="Done", state="complete", expanded=False)
+            # ----------------------------------------------
+            # Scholar delay
+            # ----------------------------------------------
+            if i < len(references):
 
-    # Show results table
-    st.subheader("📊 Results")
+                time.sleep(
+                    random.uniform(
+                        min_delay,
+                        max_delay
+                    )
+                )
+
+            progress.progress(
+                i / len(references)
+            )
+
+
+        status.update(
+            label="Done",
+            state="complete",
+            expanded=False
+        )
+
+
+    # ========================================================
+    # Results dataframe
+    # ========================================================
+    st.subheader("📊 All Results")
+
     df = pd.DataFrame(results)
 
-    # Make URLs clickable in Streamlit dataframe by showing separately
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Download CSV
-    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    # Preferred column order
+    preferred_columns = [
+        "match_status",
+        "similarity",
+        "extracted_title",
+        "found_title",
+        "original_reference",
+        "status",
+        "url",
+        "error",
+    ]
+
+    available_columns = [
+        c
+        for c in preferred_columns
+        if c in df.columns
+    ]
+
+    df = df[available_columns]
+
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    # ========================================================
+    # Mismatches only
+    # ========================================================
+    st.subheader("🚨 Titles requiring review")
+
+    review_df = df[
+        df["match_status"].isin([
+            "⚠️ Possible mismatch",
+            "❌ Mismatch",
+            "❓ Not Found",
+            "🚫 Error",
+        ])
+    ].copy()
+
+
+    if len(review_df) == 0:
+
+        st.success(
+            "No title mismatches were detected."
+        )
+
+    else:
+
+        st.dataframe(
+            review_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.info(
+            f"{len(review_df)} of "
+            f"{len(df)} references require review."
+        )
+
+
+    # ========================================================
+    # Summary
+    # ========================================================
+    st.subheader("📌 Summary")
+
+    counts = (
+        df["match_status"]
+        .value_counts(dropna=False)
+        .to_dict()
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Match",
+        counts.get("✅ Match", 0)
+    )
+
+    col2.metric(
+        "Possible mismatch",
+        counts.get("⚠️ Possible mismatch", 0)
+    )
+
+    col3.metric(
+        "Mismatch",
+        counts.get("❌ Mismatch", 0)
+    )
+
+    col4.metric(
+        "Not found / Error",
+        counts.get("❓ Not Found", 0)
+        + counts.get("🚫 Error", 0)
+    )
+
+
+    # ========================================================
+    # Download all results
+    # ========================================================
+    csv_bytes = (
+        df
+        .to_csv(index=False)
+        .encode("utf-8-sig")
+    )
+
     st.download_button(
-        "⬇️ Download results as CSV",
+        "⬇️ Download all results",
         data=csv_bytes,
         file_name="reference_validation_results.csv",
         mime="text/csv",
     )
 
-    # Quick summary
-    counts = df["status"].value_counts(dropna=False).to_dict()
-    st.info(f"Summary: {counts}")
+
+    # ========================================================
+    # Download mismatches
+    # ========================================================
+    if len(review_df) > 0:
+
+        mismatch_csv = (
+            review_df
+            .to_csv(index=False)
+            .encode("utf-8-sig")
+        )
+
+        st.download_button(
+            "⬇️ Download items requiring review",
+            data=mismatch_csv,
+            file_name="reference_title_mismatches.csv",
+            mime="text/csv",
+        )
