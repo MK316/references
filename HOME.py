@@ -22,43 +22,57 @@ st.title("📚 Reference Validator")
 st.caption(
     "Paste one reference per line. "
     "The app extracts the title, searches Google Scholar, "
-    "and checks whether the titles match."
+    "and checks whether the reference title matches the Scholar record."
 )
 
 
 # ============================================================
-# Defaults
+# Default examples
 # ============================================================
 DEFAULT_REFERENCES = [
     "Vaswani, A., et al. (2017). Attention is all you need. Advances in Neural Information Processing Systems, 30.",
     "Goodfellow, I., et al. (2014). Generative adversarial nets. Advances in Neural Information Processing Systems, 27.",
-    "Smith, J. (2020). A non-existent paper about flying spaghettis in deep learning. Journal of Imaginary Research, 10(2), 1–10.",
+    "Braun, V., & Clarke, V. (2006). Using thematic analysis in psychology. Qualitative Research in Psychology, 3(2), 77–101.",
 ]
 
 
 # ============================================================
-# Text normalization
+# Normalize title
 # ============================================================
 def normalize_title(text: str) -> str:
     """
-    Normalize titles before comparison.
+    Normalize title strings before similarity comparison.
     """
+
     if not text:
         return ""
 
     text = unicodedata.normalize("NFKC", text)
+
     text = text.lower()
 
+    # Normalize punctuation variants
     text = text.replace("’", "'")
     text = text.replace("‘", "'")
+    text = text.replace("“", '"')
+    text = text.replace("”", '"')
     text = text.replace("–", "-")
     text = text.replace("—", "-")
 
     # Remove punctuation
-    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(
+        r"[^\w\s]",
+        " ",
+        text,
+        flags=re.UNICODE
+    )
 
     # Normalize whitespace
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    ).strip()
 
     return text
 
@@ -68,15 +82,18 @@ def normalize_title(text: str) -> str:
 # ============================================================
 def extract_title_from_reference(reference: str) -> str:
     """
-    Extract the title from an APA-like reference.
+    Extract title from an APA-like reference.
 
     Example:
-    Braun, V., & Clarke, V. (2006). Using thematic analysis
-    in psychology. Qualitative Research in Psychology, 3(2), ...
+
+    Braun, V., & Clarke, V. (2006).
+    Using thematic analysis in psychology.
+    Qualitative Research in Psychology, 3(2), 77–101.
 
     -> Using thematic analysis in psychology
 
-    If no year pattern is found, the entire line is treated as a title.
+    If no publication year is detected,
+    the whole input is treated as a title.
     """
 
     reference = reference.strip()
@@ -100,10 +117,11 @@ def extract_title_from_reference(reference: str) -> str:
     if not match:
         return reference.strip(" .")
 
-    # Everything after publication year
-    remainder = reference[match.end():].strip()
+    remainder = reference[
+        match.end():
+    ].strip()
 
-    # Remove leading punctuation
+    # Remove punctuation immediately after year
     remainder = re.sub(
         r"^[\.\s]+",
         "",
@@ -111,9 +129,9 @@ def extract_title_from_reference(reference: str) -> str:
     )
 
     if not remainder:
-        return reference
+        return reference.strip()
 
-    # Protect some common abbreviations
+    # Protect common abbreviations from period splitting
     protected = remainder
 
     abbreviations = [
@@ -124,30 +142,37 @@ def extract_title_from_reference(reference: str) -> str:
         "U.K.",
         "Ph.D.",
         "Ed.D.",
+        "No.",
+        "Vol.",
     ]
 
     placeholders = {}
 
     for i, abbreviation in enumerate(abbreviations):
 
-        placeholder = f"__ABBR{i}__"
+        placeholder = f"__ABBR_{i}__"
 
         pattern = re.compile(
             re.escape(abbreviation),
             flags=re.IGNORECASE
         )
 
-        found = pattern.search(protected)
+        match_abbr = pattern.search(protected)
 
-        if found:
-            original = found.group()
-            placeholders[placeholder] = original
+        if match_abbr:
+
+            original = match_abbr.group()
+
+            placeholders[
+                placeholder
+            ] = original
+
             protected = pattern.sub(
                 placeholder,
                 protected
             )
 
-    # The first sentence after the year is treated as the title
+    # First sentence after year is treated as title
     parts = re.split(
         r"\.\s+",
         protected,
@@ -156,8 +181,9 @@ def extract_title_from_reference(reference: str) -> str:
 
     title = parts[0].strip()
 
-    # Restore abbreviations
+    # Restore protected abbreviations
     for placeholder, original in placeholders.items():
+
         title = title.replace(
             placeholder,
             original
@@ -169,12 +195,15 @@ def extract_title_from_reference(reference: str) -> str:
 
 
 # ============================================================
-# Similarity
+# Title similarity
 # ============================================================
-def title_similarity(title1: str, title2: str) -> float:
+def title_similarity(
+    title1: str,
+    title2: str
+) -> float:
     """
-    Calculate Levenshtein similarity after normalization.
-    Returns 0-100.
+    Levenshtein ratio after normalization.
+    Returns similarity percentage 0-100.
     """
 
     t1 = normalize_title(title1)
@@ -183,9 +212,15 @@ def title_similarity(title1: str, title2: str) -> float:
     if not t1 or not t2:
         return 0.0
 
-    score = ratio(t1, t2) * 100
+    score = ratio(
+        t1,
+        t2
+    ) * 100
 
-    return round(score, 2)
+    return round(
+        score,
+        2
+    )
 
 
 # ============================================================
@@ -195,13 +230,7 @@ def classify_match(
     similarity: float,
     match_threshold: int,
     mismatch_threshold: int
-):
-    """
-    Default:
-    >= 90 : Match
-    75-89 : Possible mismatch
-    < 75  : Mismatch
-    """
+) -> str:
 
     if similarity >= match_threshold:
         return "✅ Match"
@@ -214,21 +243,172 @@ def classify_match(
 
 
 # ============================================================
+# DOI helpers
+# ============================================================
+def clean_doi(
+    doi: str | None
+) -> str | None:
+    """
+    Clean DOI string.
+    """
+
+    if not doi:
+        return None
+
+    doi = str(
+        doi
+    ).strip()
+
+    # Remove doi: prefix
+    doi = re.sub(
+        r"^doi:\s*",
+        "",
+        doi,
+        flags=re.IGNORECASE
+    )
+
+    # Remove DOI URL prefix
+    doi = re.sub(
+        r"^https?://(?:dx\.)?doi\.org/",
+        "",
+        doi,
+        flags=re.IGNORECASE
+    )
+
+    # Remove trailing punctuation
+    doi = doi.rstrip(
+        ".,;)"
+    )
+
+    return doi or None
+
+
+def extract_doi_from_text(
+    text: str | None
+) -> str | None:
+    """
+    Extract DOI pattern from arbitrary text or URL.
+    """
+
+    if not text:
+        return None
+
+    doi_pattern = (
+        r"10\.\d{4,9}/"
+        r"[-._;()/:A-Z0-9]+"
+    )
+
+    match = re.search(
+        doi_pattern,
+        str(text),
+        flags=re.IGNORECASE
+    )
+
+    if not match:
+        return None
+
+    return clean_doi(
+        match.group(0)
+    )
+
+
+def extract_doi_from_result(
+    result: dict
+) -> str | None:
+    """
+    Attempt DOI extraction from a scholarly search result.
+    """
+
+    bib = (
+        result.get(
+            "bib",
+            {}
+        )
+        or {}
+    )
+
+    # --------------------------------------------------------
+    # 1. Direct DOI field
+    # --------------------------------------------------------
+    doi = bib.get(
+        "doi"
+    )
+
+    doi = clean_doi(
+        doi
+    )
+
+    if doi:
+        return doi
+
+    # --------------------------------------------------------
+    # 2. Other possible fields in bib
+    # --------------------------------------------------------
+    possible_bib_fields = [
+        "url",
+        "pub_url",
+        "eprint",
+        "citation",
+    ]
+
+    for field in possible_bib_fields:
+
+        doi = extract_doi_from_text(
+            bib.get(
+                field
+            )
+        )
+
+        if doi:
+            return doi
+
+    # --------------------------------------------------------
+    # 3. Top-level result URLs
+    # --------------------------------------------------------
+    possible_result_fields = [
+        "pub_url",
+        "eprint_url",
+    ]
+
+    for field in possible_result_fields:
+
+        doi = extract_doi_from_text(
+            result.get(
+                field
+            )
+        )
+
+        if doi:
+            return doi
+
+    return None
+
+
+# ============================================================
 # Optional proxy support
 # ============================================================
 def configure_proxy_if_available() -> bool:
 
     try:
+
         secrets = st.secrets
 
         if (
             "proxy_host" not in secrets
-            or "proxy_port" not in secrets
+            or
+            "proxy_port" not in secrets
         ):
             return False
 
-        host = secrets["proxy_host"]
-        port = int(secrets["proxy_port"])
+        host = secrets[
+            "proxy_host"
+        ]
+
+        port = int(
+            secrets[
+                "proxy_port"
+            ]
+        )
 
         user = secrets.get(
             "proxy_user",
@@ -250,17 +430,22 @@ def configure_proxy_if_available() -> bool:
         )
 
         if ok:
-            scholarly.use_proxy(pg)
+
+            scholarly.use_proxy(
+                pg
+            )
+
             return True
 
         return False
 
     except Exception:
+
         return False
 
 
 # ============================================================
-# Google Scholar check
+# Google Scholar reference check
 # ============================================================
 def check_reference_validity(
     original_reference: str,
@@ -270,10 +455,10 @@ def check_reference_validity(
     max_candidates: int = 5,
 ):
     """
-    Search Google Scholar using the extracted title.
+    Search Google Scholar using extracted title.
 
-    Several search results are checked and the result with
-    the highest title similarity is selected.
+    Multiple Scholar results are inspected.
+    The result with the highest title similarity is selected.
     """
 
     try:
@@ -284,18 +469,34 @@ def check_reference_validity(
 
         candidates = []
 
-        for _ in range(max_candidates):
+        # ----------------------------------------------------
+        # Check several results instead of only first result
+        # ----------------------------------------------------
+        for _ in range(
+            max_candidates
+        ):
 
             try:
-                result = next(search_query)
+
+                result = next(
+                    search_query
+                )
 
             except StopIteration:
+
                 break
 
-            found_title = (
-                result
-                .get("bib", {})
-                .get("title", "")
+            bib = (
+                result.get(
+                    "bib",
+                    {}
+                )
+                or {}
+            )
+
+            found_title = bib.get(
+                "title",
+                ""
             )
 
             if not found_title:
@@ -306,13 +507,17 @@ def check_reference_validity(
                 found_title
             )
 
-            candidates.append({
-                "result": result,
-                "found_title": found_title,
-                "similarity": similarity,
-            })
+            candidates.append(
+                {
+                    "result": result,
+                    "found_title": found_title,
+                    "similarity": similarity,
+                }
+            )
 
-        # No Google Scholar result
+        # ----------------------------------------------------
+        # No Scholar result
+        # ----------------------------------------------------
         if not candidates:
 
             return {
@@ -322,19 +527,33 @@ def check_reference_validity(
                 "extracted_title": title_to_check,
                 "found_title": None,
                 "similarity": 0.0,
+                "doi": None,
+                "doi_url": None,
                 "url": None,
                 "error": None,
             }
 
-        # Best matching Scholar result
+        # ----------------------------------------------------
+        # Select best title match
+        # ----------------------------------------------------
         best = max(
             candidates,
-            key=lambda x: x["similarity"]
+            key=lambda x: x[
+                "similarity"
+            ]
         )
 
-        best_result = best["result"]
-        best_title = best["found_title"]
-        best_similarity = best["similarity"]
+        best_result = best[
+            "result"
+        ]
+
+        best_title = best[
+            "found_title"
+        ]
+
+        best_similarity = best[
+            "similarity"
+        ]
 
         match_status = classify_match(
             best_similarity,
@@ -342,10 +561,32 @@ def check_reference_validity(
             mismatch_threshold
         )
 
+        # ----------------------------------------------------
+        # URL
+        # ----------------------------------------------------
         url = (
-            best_result.get("pub_url")
-            or best_result.get("eprint_url")
-            or "N/A"
+            best_result.get(
+                "pub_url"
+            )
+            or
+            best_result.get(
+                "eprint_url"
+            )
+            or
+            None
+        )
+
+        # ----------------------------------------------------
+        # DOI
+        # ----------------------------------------------------
+        doi = extract_doi_from_result(
+            best_result
+        )
+
+        doi_url = (
+            f"https://doi.org/{doi}"
+            if doi
+            else None
         )
 
         return {
@@ -355,6 +596,8 @@ def check_reference_validity(
             "extracted_title": title_to_check,
             "found_title": best_title,
             "similarity": best_similarity,
+            "doi": doi,
+            "doi_url": doi_url,
             "url": url,
             "error": None,
         }
@@ -368,21 +611,27 @@ def check_reference_validity(
             "extracted_title": title_to_check,
             "found_title": None,
             "similarity": 0.0,
+            "doi": None,
+            "doi_url": None,
             "url": None,
             "error": str(e),
         }
 
 
 # ============================================================
-# Sidebar settings
+# Sidebar
 # ============================================================
-st.sidebar.header("⚙️ Settings")
+st.sidebar.header(
+    "⚙️ Settings"
+)
 
 
 # ------------------------------------------------------------
-# Match thresholds
+# Matching settings
 # ------------------------------------------------------------
-st.sidebar.subheader("Title matching")
+st.sidebar.subheader(
+    "Title matching"
+)
 
 match_threshold = st.sidebar.slider(
     "Match threshold (%)",
@@ -410,9 +659,11 @@ max_candidates = st.sidebar.slider(
 
 
 # ------------------------------------------------------------
-# Delay settings
+# Request delay
 # ------------------------------------------------------------
-st.sidebar.subheader("Scholar requests")
+st.sidebar.subheader(
+    "Scholar requests"
+)
 
 min_delay = st.sidebar.slider(
     "Minimum delay (seconds)",
@@ -453,25 +704,32 @@ if use_proxy:
 
     st.sidebar.write(
         "Proxy status:",
-        "✅ enabled"
-        if ok
-        else "❌ not configured / failed"
+        (
+            "✅ enabled"
+            if ok
+            else
+            "❌ not configured / failed"
+        )
     )
 
 
 # ============================================================
-# Input references
+# Reference input
 # ============================================================
-st.subheader("📚 References to verify")
+st.subheader(
+    "📚 References to verify"
+)
 
 st.write(
     "Enter **one complete reference per line**. "
-    "The title will be extracted automatically."
+    "The reference title will be extracted automatically."
 )
 
 raw_text = st.text_area(
     "References",
-    value="\n".join(DEFAULT_REFERENCES),
+    value="\n".join(
+        DEFAULT_REFERENCES
+    ),
     height=280,
 )
 
@@ -482,9 +740,11 @@ references = [
 ]
 
 if not references:
+
     st.warning(
         "Please enter at least one reference."
     )
+
     st.stop()
 
 
@@ -495,14 +755,18 @@ preview_data = []
 
 for ref in references:
 
-    extracted = extract_title_from_reference(
-        ref
+    extracted = (
+        extract_title_from_reference(
+            ref
+        )
     )
 
-    preview_data.append({
-        "Original Reference": ref,
-        "Extracted Title": extracted,
-    })
+    preview_data.append(
+        {
+            "Original Reference": ref,
+            "Extracted Title": extracted,
+        }
+    )
 
 preview_df = pd.DataFrame(
     preview_data
@@ -521,7 +785,7 @@ with st.expander(
 
 
 # ============================================================
-# Run button
+# Run controls
 # ============================================================
 colA, colB = st.columns(
     [1, 2]
@@ -537,7 +801,8 @@ with colA:
 with colB:
 
     st.write(
-        f"Total references: **{len(references)}**"
+        f"Total references: "
+        f"**{len(references)}**"
     )
 
 
@@ -548,7 +813,9 @@ if run:
 
     results = []
 
-    progress = st.progress(0)
+    progress = st.progress(
+        0
+    )
 
     log_box = st.empty()
 
@@ -569,7 +836,8 @@ if run:
             )
 
             log_box.write(
-                f"🔍 Searching: **{extracted_title}**"
+                f"🔍 Searching: "
+                f"**{extracted_title}**"
             )
 
             attempt = 0
@@ -587,14 +855,21 @@ if run:
                     max_candidates=max_candidates,
                 )
 
+                # --------------------------------------------
+                # Retry on error
+                # --------------------------------------------
                 if (
-                    result["status"] == "Error"
-                    and attempt <= max_retries
+                    result["status"]
+                    == "Error"
+                    and
+                    attempt <= max_retries
                 ):
 
                     st.write(
                         f"⚠️ Error "
-                        f"(attempt {attempt}/{max_retries}). "
+                        f"(attempt "
+                        f"{attempt}/"
+                        f"{max_retries}). "
                         f"Retrying..."
                     )
 
@@ -615,20 +890,26 @@ if run:
 
 
             # =================================================
-            # Display individual result
+            # Individual result display
             # =================================================
-            if result["status"] == "Found":
+            if (
+                result["status"]
+                == "Found"
+            ):
 
-                message = (
+                result_message = (
                     f"{result['match_status']} | "
                     f"Matching Rate: "
                     f"{result['similarity']}%"
                 )
 
-                if result["match_status"] == "✅ Match":
+                if (
+                    result["match_status"]
+                    == "✅ Match"
+                ):
 
                     st.success(
-                        message
+                        result_message
                     )
 
                 elif (
@@ -637,40 +918,54 @@ if run:
                 ):
 
                     st.warning(
-                        message
+                        result_message
                     )
 
                 else:
 
                     st.error(
-                        message
+                        result_message
                     )
 
                 st.write(
-                    f"**Reference title:** "
+                    "**Reference title:** "
                     f"{result['extracted_title']}"
                 )
 
                 st.write(
-                    f"**Scholar title:** "
+                    "**Scholar title:** "
                     f"{result['found_title']}"
                 )
 
-                if (
-                    result["url"]
-                    and result["url"] != "N/A"
-                ):
+                if result["doi"]:
 
                     st.write(
-                        f"**URL:** "
+                        "**DOI:** "
+                        f"{result['doi']}"
+                    )
+
+                if result["doi_url"]:
+
+                    st.write(
+                        "**DOI URL:** "
+                        f"{result['doi_url']}"
+                    )
+
+                if result["url"]:
+
+                    st.write(
+                        "**Source URL:** "
                         f"{result['url']}"
                     )
 
 
-            elif result["status"] == "Not Found":
+            elif (
+                result["status"]
+                == "Not Found"
+            ):
 
                 st.warning(
-                    f"❓ Not Found: "
+                    "❓ Not Found: "
                     f"{result['extracted_title']}"
                 )
 
@@ -678,13 +973,17 @@ if run:
             else:
 
                 st.error(
-                    f"🚫 Error: "
+                    "🚫 Error: "
                     f"{result.get('error', 'Unknown error')}"
                 )
 
 
-            # Delay between requests
-            if i < len(references):
+            # =================================================
+            # Delay between Scholar requests
+            # =================================================
+            if i < len(
+                references
+            ):
 
                 time.sleep(
                     random.uniform(
@@ -694,7 +993,9 @@ if run:
                 )
 
             progress.progress(
-                i / len(references)
+                i / len(
+                    references
+                )
             )
 
 
@@ -706,7 +1007,7 @@ if run:
 
 
     # ========================================================
-    # Create results dataframe
+    # Results dataframe
     # ========================================================
     df = pd.DataFrame(
         results
@@ -722,32 +1023,36 @@ if run:
             "similarity": "Matching Rate (%)",
             "extracted_title": "Reference Title",
             "found_title": "Scholar Title",
+            "doi": "DOI",
+            "doi_url": "DOI URL",
+            "url": "URL",
             "original_reference": "Original Reference",
             "status": "Search Status",
-            "url": "URL",
             "error": "Error",
         }
     )
 
 
     # ========================================================
-    # Preferred column order
+    # Column order
     # ========================================================
     preferred_columns = [
         "Match Status",
         "Matching Rate (%)",
         "Reference Title",
         "Scholar Title",
+        "DOI",
+        "DOI URL",
+        "URL",
         "Original Reference",
         "Search Status",
-        "URL",
         "Error",
     ]
 
     available_columns = [
-        c
-        for c in preferred_columns
-        if c in df.columns
+        column
+        for column in preferred_columns
+        if column in df.columns
     ]
 
     df = df[
@@ -756,7 +1061,7 @@ if run:
 
 
     # ========================================================
-    # Show all results
+    # All results
     # ========================================================
     st.subheader(
         "📊 All Results"
@@ -765,28 +1070,51 @@ if run:
     st.dataframe(
         df,
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
+        column_config={
+            "Matching Rate (%)":
+                st.column_config.NumberColumn(
+                    "Matching Rate (%)",
+                    format="%.2f"
+                ),
+
+            "DOI URL":
+                st.column_config.LinkColumn(
+                    "DOI URL"
+                ),
+
+            "URL":
+                st.column_config.LinkColumn(
+                    "URL"
+                ),
+        }
     )
 
 
     # ========================================================
-    # Titles requiring review
+    # Review items
     # ========================================================
     st.subheader(
         "🚨 Titles requiring review"
     )
 
     review_df = df[
-        df["Match Status"].isin([
-            "⚠️ Possible mismatch",
-            "❌ Mismatch",
-            "❓ Not Found",
-            "🚫 Error",
-        ])
+        df[
+            "Match Status"
+        ].isin(
+            [
+                "⚠️ Possible mismatch",
+                "❌ Mismatch",
+                "❓ Not Found",
+                "🚫 Error",
+            ]
+        )
     ].copy()
 
 
-    if len(review_df) == 0:
+    if len(
+        review_df
+    ) == 0:
 
         st.success(
             "No title mismatches were detected."
@@ -797,12 +1125,30 @@ if run:
         st.dataframe(
             review_df,
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            column_config={
+                "Matching Rate (%)":
+                    st.column_config.NumberColumn(
+                        "Matching Rate (%)",
+                        format="%.2f"
+                    ),
+
+                "DOI URL":
+                    st.column_config.LinkColumn(
+                        "DOI URL"
+                    ),
+
+                "URL":
+                    st.column_config.LinkColumn(
+                        "URL"
+                    ),
+            }
         )
 
         st.info(
             f"{len(review_df)} of "
-            f"{len(df)} references require review."
+            f"{len(df)} references "
+            f"require review."
         )
 
 
@@ -814,15 +1160,19 @@ if run:
     )
 
     counts = (
-        df["Match Status"]
+        df[
+            "Match Status"
+        ]
         .value_counts(
             dropna=False
         )
         .to_dict()
     )
 
-    col1, col2, col3, col4 = st.columns(
-        4
+    col1, col2, col3, col4 = (
+        st.columns(
+            4
+        )
     )
 
     col1.metric(
@@ -881,7 +1231,9 @@ if run:
     st.download_button(
         "⬇️ Download all results",
         data=csv_bytes,
-        file_name="reference_validation_results.csv",
+        file_name=(
+            "reference_validation_results.csv"
+        ),
         mime="text/csv",
     )
 
@@ -889,7 +1241,9 @@ if run:
     # ========================================================
     # Download review items
     # ========================================================
-    if len(review_df) > 0:
+    if len(
+        review_df
+    ) > 0:
 
         review_csv = (
             review_df
@@ -904,6 +1258,8 @@ if run:
         st.download_button(
             "⬇️ Download items requiring review",
             data=review_csv,
-            file_name="reference_title_mismatches.csv",
+            file_name=(
+                "reference_title_mismatches.csv"
+            ),
             mime="text/csv",
         )
