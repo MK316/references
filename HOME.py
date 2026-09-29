@@ -5,6 +5,7 @@ import streamlit as st
 
 from scholarly import scholarly, ProxyGenerator
 from Levenshtein import ratio
+from bibtexparser.bibdatabase import BibDatabase
 
 
 # ----------------------------
